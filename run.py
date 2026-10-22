@@ -18,6 +18,7 @@ from pathchain.blockchain import Blockchain, TARGET_BLOCK_TIME  # noqa: E402
 from pathchain.miner import Miner                              # noqa: E402
 from pathchain.node import Node, local_interface_details       # noqa: E402
 from pathchain.server import App, start_http                   # noqa: E402
+from pathchain.bots import MarketEngine, BotMinerPool          # noqa: E402
 
 
 def banner(app, args):
@@ -35,6 +36,7 @@ def banner(app, args):
 
   Currency     : PATH   Block reward: 10 PATH
   Block target : every {args.blocktime}s (difficulty auto-retargets)
+  Bot engine   : markets + bot miners ON (configure in the explorer Settings)
 
   Share this on other machines:  python run.py --connect {lan_ip}:{args.tcp}
   (or just start it — LAN discovery connects everyone automatically)
@@ -74,11 +76,17 @@ def main():
 
     miner = Miner(chain, events=log_event)
     node = Node(chain, miner, args.name, args.tcp, args.udp, args.http, events=log_event)
-    app = App(chain, miner, node)
+    market = MarketEngine(args.datadir, events=log_event)
+    bot_miners = BotMinerPool(chain, market, node, events=log_event)
+    app = App(chain, miner, node, market=market, bot_miners=bot_miners)
     app_holder["app"] = app
 
     node.start()
     miner.start_thread()
+    market.start()
+    market_cfg = market.view_config()
+    if market_cfg.get("enabled") and int(market_cfg.get("miners", 0)) > 0:
+        bot_miners.start()
     start_http(app, args.http)
     banner(app, args)
 
@@ -92,6 +100,8 @@ def main():
             chain.save()  # periodic checkpoint
     except KeyboardInterrupt:
         print("\nShutting down PATHchain node…")
+        market.stop()
+        bot_miners.stop()
         node.stop()
         chain.save()
 

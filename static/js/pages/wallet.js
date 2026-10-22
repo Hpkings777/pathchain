@@ -94,7 +94,7 @@ async function loadWallets(quiet = false) {
   let wallets;
   try { wallets = await api.wallets(); }
   catch (e) { if (!quiet) list.innerHTML = empty(e.message); return; }
-  const json = JSON.stringify(wallets.map(w => [w.name, w.balance, w.spendable, w.pending_out]));
+  const json = JSON.stringify(wallets.map(w => [w.name, w.balance, w.spendable, w.pending_out, w.is_bot]));
   if (quiet && json === lastWalletsJson) return; // nothing changed — skip re-render
   lastWalletsJson = json;
   if (!wallets.length) {
@@ -108,7 +108,7 @@ async function loadWallets(quiet = false) {
     <div class="wallet-row ${w.name === selected ? 'selected' : ''}" data-w="${esc(w.name)}">
       <span class="avatar">${esc(w.name.slice(0, 2).toUpperCase())}</span>
       <div style="min-width:0">
-        <div class="wname">${esc(w.name)} ${w.name === selected ? badge('SELECTED', 'blue') : ''}</div>
+        <div class="wname">${esc(w.name)} ${w.is_bot ? badge('BOT', 'yellow') : ''} ${w.name === selected ? badge('SELECTED', 'blue') : ''}</div>
         <div class="waddr">${esc(w.address)}</div>
       </div>
       <div class="wbal">
@@ -199,13 +199,41 @@ async function showKeys(name) {
       <div class="key-row"><div class="kl">Wallet name</div><div class="kv2">${esc(k.name)}</div></div>
       <div class="key-row"><div class="kl">Address (P2PKH)</div><div class="kv2">${esc(k.address)}</div></div>
       <div class="key-row"><div class="kl">Public key (compressed)</div><div class="kv2">${esc(k.public_key_hex)}</div></div>
-      <div class="key-row"><div class="kl">Private key (hex)</div><div class="kv2 red">${esc(k.private_key_hex)}</div></div>
-      <div class="key-row"><div class="kl">Private key (WIF)</div><div class="kv2 red">${esc(k.wif)}</div></div>
+      <div class="key-row">
+        <div class="kl">Private key (hex)</div>
+        <div class="kv2">
+          <span class="mono red" data-secret>•••• •••• •••• •••• •••• •••• •••• ••••</span>
+          <button class="btn btn-sm" data-reveal style="margin-left:8px">Reveal</button>
+        </div>
+      </div>
+      <div class="key-row">
+        <div class="kl">Private key (WIF)</div>
+        <div class="kv2">
+          <span class="mono red" data-secret>•••• •••• •••• •••• •••• ••••</span>
+          <button class="btn btn-sm" data-reveal style="margin-left:8px">Reveal</button>
+        </div>
+      </div>
+      <div class="note-warn" data-reveal-warn style="display:none"><b>In a real wallet this is the moment that matters:</b> whoever sees this string owns every coin in the wallet — there is no reset, no password, no undo. That is why real wallets never let you peek at the key after setup.</div>
       <div class="muted" style="font-size:12px;margin-top:10px">
         Address = Base58Check(0x00 + RIPEMD160(SHA256(pubkey))). WIF = Base58Check(0x80 + key + 0x01) — the
         exact encodings Bitcoin uses, so students can cross-check with any textbook.
       </div>
     </div>`);
+    // real wallets NEVER show the private key after creation — mask it behind an
+    // explicit reveal so the demo tells the true story, not a convenient one
+    let revealed = false;
+    body.querySelectorAll('[data-reveal]').forEach(btn => {
+      btn.onclick = () => {
+        revealed = !revealed;
+        body.querySelectorAll('[data-secret]').forEach(s => {
+          s.textContent = revealed
+            ? (s.closest('.key-row').querySelector('.kl').textContent.includes('WIF') ? k.wif : k.private_key_hex)
+            : '•••• •••• •••• •••• •••• •••• •••• ••••';
+        });
+        body.querySelector('[data-reveal-warn]').style.display = revealed ? 'block' : 'none';
+        btn.textContent = revealed ? 'Hide' : 'Reveal';
+      };
+    });
     modal(`Keys for ${name}`, body);
   } catch (e) { toast(e.message, 'err'); }
 }

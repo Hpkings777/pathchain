@@ -1,6 +1,6 @@
 // PATHchain — network page: peers, discovery, tamper demo, consensus votes
 import { App, api } from '../api.js';
-import { el, esc, empty, badge, toast, nodeChip } from '../ui.js';
+import { el, esc, empty, badge, toast, nodeChip, confirmDanger } from '../ui.js';
 import { fmtNum, timeAgo, fmtTime, shortHash, COIN } from '../fmt.js';
 
 let offLive = null;
@@ -41,10 +41,10 @@ export async function render(container) {
           <h3>Demonstrations <span class="right muted">safe to run live</span></h3>
           <div class="grid cols-2" style="gap:10px">
             <button class="btn" id="btn-tamper">Simulate tampering (tip block)</button>
-            <button class="btn" id="btn-sync">Force state broadcast</button>
+            <button class="btn" id="btn-rollback">Reset chain → last valid block</button>
           </div>
           <div class="muted" style="font-size:12px;margin-top:10px">
-            <b>Tamper demo script:</b> 1) keep two computers connected → 2) press “Simulate tampering” here →
+            <b>Tamper demo script:</b> 1) keep two computers connected → 2) press “Simulate tampering” here (or edit a block on the <a href="#/chain">Chain view</a>) →
             every node's chain turns RED (the edited transaction fails its signature check) → 3) other computers
             vote → 4) majority YES rolls the chain back to the last valid block and bumps the epoch —
             the hacker keeps nothing.
@@ -65,13 +65,24 @@ export async function render(container) {
     catch (e) { toast(e.message, 'err'); }
   };
   document.getElementById('btn-tamper').onclick = async () => {
-    if (!confirm('Tamper with the newest block (demo)? The network will vote on a rollback.')) return;
+    const ok = await confirmDanger({
+      title: 'Tamper with the newest block (demo)?',
+      body: 'A transaction in the tip block gets rewritten. The hash breaks network-wide and every peer votes on a rollback.',
+      confirmLabel: 'Tamper the tip block',
+    });
+    if (!ok) return;
     try { const r = await api.tamper('tamper test'); toast(r.message, 'err'); }
     catch (e) { toast(e.message, 'err'); }
   };
-  document.getElementById('btn-sync').onclick = async () => {
-    try { const r = await api.connect(''); } catch (e) { /* noop */ }
-    toast('State broadcast queued (peers sync every 4s automatically)', 'ok');
+  document.getElementById('btn-rollback').onclick = async () => {
+    const ok = await confirmDanger({
+      title: 'Reset the chain to its last valid block?',
+      body: 'All tampered blocks are removed, the epoch is bumped, and peers receive the recovery snapshot.',
+      confirmLabel: 'Reset chain',
+    });
+    if (!ok) return;
+    try { const r = await api.rollback(); toast(r.message, 'ok'); }
+    catch (e) { toast(e.message, 'err'); }
   };
 
   const paint = async (s) => { if (s) await paintAll(s); };
@@ -106,22 +117,55 @@ async function paintAll(s) {
     const pt = document.getElementById('peer-table');
     const pc = document.getElementById('peer-count');
     if (pc) pc.textContent = `${peers.connected.length} connected · ${peers.discovered.length} discovered`;
-    const sig = JSON.stringify([peers.connected.map(p => [p.node_id, p.height, Math.round(p.lag)]), peers.discovered.length]);
+    const sig = JSON.stringify([peers.connected.map(p => [p.node_id, p.height, Math.round(p.lag), p.rtt_ms]),
+                                peers.discovered.map(d => [d.node_id, d.connected])]);
     if (sig !== lastPeerSig) {
       lastPeerSig = sig;
       pt.innerHTML = peers.connected.length ? `
       <div class="table-wrap"><table class="tbl">
-        <thead><tr><th></th><th>Node</th><th>IP</th><th class="num">Height</th><th>Last seen</th></tr></thead>
-        <tbody>${peers.connected.map(p => `
+        <thead><tr><th></th><th>Node</th><th>IP</th><th class="num">Height</th><th class="num">Latency</th><th>Status</th></tr></thead>
+        <tbody>${peers.connected.map(p => {
+          const rtt = p.rtt_ms;
+          const rttBadge = rtt === null || rtt === undefined
+            ? '<span class="muted">measuring…</span>'
+            : `<b class="${rtt < 40 ? 'green' : rtt < 150 ? '' : 'yellow'}">${rtt} ms</b>`;
+          return `
           <tr>
             <td>${nodeChip(p.name)}</td>
             <td><b>${esc(p.name || '?')}</b><div class="faint mono" style="font-size:10.5px">${esc((p.node_id || '').slice(0, 12))}</div></td>
             <td class="mono">${esc(p.ip)}:${p.port}</td>
             <td class="num">${p.height || '—'}</td>
-            <td class="muted">${p.lag < 6 ? `${p.lag.toFixed(1)}s ago` : badge('STALE', 'yellow')}</td>
-          </tr>`).join('')}</tbody></table></div>`
+            <td class="num">${rttBadge}</td>
+            <td>${p.status === 'stale' ? badge('STALE', 'yellow') : badge('CONNECTED', 'green')}</td>
+          </tr>`;
+        }).join('')}</tbody></table></div>`
       : empty('No peers connected yet. Start PATHchain on another computer — it auto-discovers via UDP. Or connect by IP above.');
     }
+    // discovered-but-not-connected peers: one-click connect
+    const unconnected = (peers.discovered || []).filter(d => !d.connected);
+    let discoBox = document.getElementById('discovered-list');
+    if (!discoBox) {
+      discoBox = el(`<div id="discovered-list" style="margin-top:10px"></div>`);
+      pt.parentElement.appendChild(discoBox);
+    }
+    discoBox.innerHTML = unconnected.length
+      ? `<div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;font-weight:700;margin-bottom:6px">Discovered on this LAN — not connected</div>` +
+        unconnected.map(d => `
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed var(--border)">
+            ${nodeChip(d.name)}
+            <div style="flex:1"><b style="font-size:13px">${esc(d.name)}</b> <span class="muted mono" style="font-size:11px">${esc(d.ip)}:${d.port}</span></div>
+            <span class="muted" style="font-size:11px">height ${d.height}</span>
+            <button class="btn btn-sm" data-connect="${esc(d.ip)}:${d.port}">Connect</button>
+          </div>`).join('')
+      : '';
+    discoBox.querySelectorAll('[data-connect]').forEach(b => {
+      b.onclick = async () => {
+        b.disabled = true;
+        try { const r = await api.connect(b.dataset.connect); toast(r.message, 'ok'); }
+        catch (e) { toast(e.message, 'err'); }
+        b.disabled = false;
+      };
+    });
   }
 
   // vote panel

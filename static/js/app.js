@@ -2,8 +2,11 @@
 import { App, api } from './api.js';
 import { toast, esc } from './ui.js';
 import { startTour, maybeWelcome } from './tour.js';
+import { wireVoteOverlay } from './chainview.js';
 import * as home from './pages/home.js';
 import * as market from './pages/market.js';
+import * as chain from './pages/chain.js';
+import * as settings from './pages/settings.js';
 import * as blocks from './pages/blocks.js';
 import * as block from './pages/block.js';
 import * as tx from './pages/tx.js';
@@ -14,8 +17,9 @@ import * as network from './pages/network.js';
 import * as charts from './pages/charts.js';
 
 const routes = {
-  '/': home, '/market': market, '/blocks': blocks, '/block': block, '/tx': tx,
-  '/address': address, '/wallet': wallet, '/mine': mine, '/network': network, '/charts': charts,
+  '/': home, '/market': market, '/chain': chain, '/settings': settings, '/blocks': blocks,
+  '/block': block, '/tx': tx, '/address': address, '/wallet': wallet, '/mine': mine,
+  '/network': network, '/charts': charts,
 };
 
 // tabs map a detail path to the tab that should light up
@@ -63,6 +67,12 @@ export async function route() {
 export async function doSearch(q) {
   q = (q || '').trim();
   if (!q) return;
+  // hash/hex fields must be hex — catch typos before the round-trip
+  const looksHex = /^[0-9a-fA-F]+$/.test(q) && q.length >= 12;
+  if (looksHex && q.length !== 40 && q.length !== 64 && q.length !== 66) {
+    toast(`That looks like a hash but hashes here are 64 hex characters (this is ${q.length})`, 'err');
+    return;
+  }
   try {
     const r = await api.search(q);
     if (r.type === 'block') return navigate(`/block/${r.ref}`);
@@ -140,6 +150,9 @@ window.addEventListener('error', (e) => {
 
 wireMobileChrome();
 window.addEventListener('hashchange', route);
+
+// consensus vote overlay — global, event-driven from the live state
+wireVoteOverlay();
 
 // guided tour entry points (nav button + first-visit welcome card)
 document.getElementById('btn-tour')?.addEventListener('click', startTour);

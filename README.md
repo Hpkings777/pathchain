@@ -13,6 +13,71 @@ market API when the internet is available and are never invented.
 
 ---
 
+
+## What's new in this build (v2)
+
+- **Chain view** — the blockchain as a living flowchart: block cards linked by
+  animated arrows, new blocks slide in with a glow pulse, clicking any card
+  opens a slide-in panel with the full header, Merkle root and transactions.
+- **Tamper theatre** — edit a block from the chain view: the card shakes, the
+  hash flickers to its recomputed (mismatched) value, every downstream block
+  flashes "Integrity broken", the arrows turn red and dash-animate, peers vote
+  in a consensus overlay with animated rejection stamps, and **Reset chain**
+  (or a majority vote) rolls everything back with a reverse animation.
+- **Bot engine + live market** — up to 50 bots trade a transparently simulated
+  PATH/USD market on two venues (DEX + Secondary): mean-reversion + momentum
+  traders, market makers that widen spreads on volatility, arbitrageurs that
+  close the inter-venue spread, and miner bots that mine REAL SHA-256 blocks.
+  Configure everything in Settings (bot count, type mix, regime, tick rate,
+  base price, volatility, aggression, mining power). Prices stream to the UI
+  over SSE and are eased every animation frame — no jumpy updates.
+- **Market page v2** — candlesticks with volume, live order-book ladder with
+  animated level changes, depth chart, trade prints, and a site-wide ticker
+  tape (price, 24 h change, volume, bot count, regime).
+- **Networking upgrades** — peer latency (ping) in the Network page, one-click
+  connect for discovered-but-not-connected peers, self-connection and duplicate
+  guards, firewall-aware error messages, exponential backoff with a visible
+  "Reconnecting…" chip, and a retry/discard queue for ops dropped mid-outage.
+- **Consensus improvements** — votes are idempotent per peer and can be changed
+  before the poll closes; open polls survive reconnects (they travel in sync
+  snapshots); concurrent tamper alerts resolve latest-wins; destructive actions
+  need a 3-second-delayed confirm.
+- **Design system v2** — layered elevation shadows, purposeful micro-animations
+  (press scale 0.96, hover glows, staggered entrances), visible focus rings,
+  full `prefers-reduced-motion` fallbacks, dark theme default + light theme
+  toggle, and 60 fps-only animations (transform/opacity).
+
+### Polish round (merged & hardened)
+
+- **Bandwidth**: SSE market frames now ship candles ~1×/second instead of at the
+  raw tick rate (the client caches them) — a frame drops from ~24 KB to ~4 KB,
+  which is the difference between 30 phones streaming fine and melting the AP.
+  Chain snapshots broadcast only when something changed (20 s heartbeat).
+- **LAN auto-heal**: duplicate links are deduped deterministically, silent links
+  are reaped after 45 s and retried, peers are remembered across reboots
+  (survives blocked UDP broadcast), UDP discovery re-probes periodically, and a
+  peerless node sweeps its /24 peer port as a last resort — two machines find
+  each other even on client-isolated school Wi-Fi.
+- **Economy safety nets**: drained bots are re-capitalised ("new participants
+  enter the market") and the books re-anchor if the price ever escapes its
+  sanity band — an hours-long demo can no longer bankrupt the market.
+- **True forensics**: the block page runs the node's real validator and shows
+  its verdict + human reason (covers inflated-amount edits, which leave the
+  header hash untouched); the genesis block refuses tampering outright.
+- **Wallet realism**: private keys are masked behind a Reveal button with the
+  warning a real wallet gives you; bot wallets are badged BOT.
+- **Guided tour v2**: 10 steps covering the ticker tape, the living chain view,
+  the tamper theatre, the bot market, the Settings studio and the consensus demo.
+- Roster math now honours the exact bot count (largest-remainder apportionment),
+  `/api/block` + `/api/tx` return proper 404-style errors, and log lines can no
+  longer interleave into garbage.
+
+Everything still runs on **Python 3.8+ stdlib only** — no pip installs, no
+Node.js, no internet required. The market remains a clearly-labelled
+simulation; bot miner blocks are real proof-of-work on the real chain.
+
+---
+
 ## Quick start (60 seconds)
 
 Requirements: **Python 3.8+ only. No pip installs, no internet, no Node.js.**

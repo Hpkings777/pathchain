@@ -17,6 +17,8 @@ from . import blockchain as bcmod
 from .blockchain import COIN_NAME, MINING_REWARD, TARGET_BLOCK_TIME
 from .node import local_interface_details
 
+MAX_SSE_CLIENTS = 32
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
 
 
@@ -48,6 +50,9 @@ def make_handler(app):
             length = int(self.headers.get("Content-Length", 0) or 0)
             if not length:
                 return {}
+            if length > 1024 * 1024:          # sanity cap — no client needs more
+                self.rfile.read(length)
+                return {}
             try:
                 return json.loads(self.rfile.read(length).decode("utf-8"))
             except (ValueError, UnicodeDecodeError):
@@ -63,6 +68,8 @@ def make_handler(app):
                 if not os.path.isfile(full):
                     return self._err("Not found", 404)
             ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+            if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
+                ctype += "; charset=utf-8"
             with open(full, "rb") as f:
                 body = f.read()
             self.send_response(200)
@@ -72,6 +79,61 @@ def make_handler(app):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
+
+        def _sse(self):
+            """Server-Sent Events: the market snapshot streams at the bot tick
+            rate (100ms–1s). Plain HTTP that EventSource understands — zero
+            dependencies. The client falls back to polling if this fails."""
+            engine = app.market
+            if engine is None:
+                return self._err("Market engine not wired", 503)
+            with engine.lock:
+                if len(engine.subscribers) >= MAX_SSE_CLIENTS:
+                    return self._err("Too many live streams on this node", 503)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            wlock = threading.Lock()
+            supply_cache = {"v": None, "t": 0.0}
+
+            def push(snap):
+                # the market page derives market cap from supply — the engine
+                # doesn't know chain balances, so enrich frames here (cheap:
+                # balances are per-tip cached, refreshed every 5s)
+                now = time.time()
+                if now - supply_cache["t"] > 5.0:
+                    supply_cache["t"] = now
+                    try:
+                        bal, _txs = app._cached_chain_totals()
+                        supply_cache["v"] = sum(bal.values())
+                    except Exception:
+                        pass
+                if supply_cache["v"] is not None:
+                    snap = dict(snap)
+                    snap["supply"] = supply_cache["v"]
+                data = json.dumps(snap, separators=(",", ":"))
+                with wlock:
+                    self.wfile.write(f"event: market\ndata: {data}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+
+            try:
+                self.wfile.write(b"retry: 2000\n\n")
+                engine.subscribers.append(push)
+                push(engine.public_view())            # first frame immediately
+                while True:
+                    time.sleep(5.0)
+                    with wlock:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+                pass
+            finally:
+                try:
+                    engine.subscribers.remove(push)
+                except (ValueError, AttributeError):
+                    pass
 
         # ------------------------------------------------------------ routing ----
         def do_GET(self):
@@ -116,10 +178,16 @@ def make_handler(app):
 
             if route.startswith("block/"):
                 ref = unquote(route[len("block/"):])
-                return self._ok(app.block_detail(ref))
+                detail = app.block_detail(ref)
+                if isinstance(detail, dict) and detail.get("error"):
+                    return self._err(detail["error"])     # proper 400, not ok:true
+                return self._ok(detail)
 
             if route.startswith("tx/"):
-                return self._ok(app.tx_detail(unquote(route[len("tx/"):])), )
+                detail = app.tx_detail(unquote(route[len("tx/"):]))
+                if isinstance(detail, dict) and detail.get("error"):
+                    return self._err(detail["error"])
+                return self._ok(detail)
 
             if route.startswith("address/"):
                 return self._ok(app.address_detail(unquote(route[len("address/"):])), )
@@ -129,7 +197,10 @@ def make_handler(app):
 
             if route.startswith("wallet/") and route.endswith("/keys"):
                 name = unquote(route[len("wallet/"):-len("/keys")])
-                return self._ok(app.wallet_keys(name))
+                keys = app.wallet_keys(name)
+                if isinstance(keys, dict) and keys.get("error"):
+                    return self._err(keys["error"])
+                return self._ok(keys)
 
             if route == "mine/status":
                 return self._ok(miner.status())
@@ -154,6 +225,32 @@ def make_handler(app):
                 with node.lock:
                     return self._ok({"poll": dict(node.poll) if node.poll else None,
                                      "node_id": node.node_id})
+
+            if route == "market":
+                if app.market is None:
+                    return self._err("Market engine not wired", 503)
+                stats = app._stats(app.chain.compute_balances(), 0, len(node.peers))
+                return self._ok(app.market.public_view(chain_stats=stats))
+
+            if route.startswith("market/candles"):
+                bucket = q.get("bucket", ["10"])[0]
+                return self._ok({"bucket": bucket, "candles": app.market.candle_tail(bucket)})
+
+            if route == "bots":
+                if app.market is None:
+                    return self._err("Market engine not wired", 503)
+                return self._ok({
+                    "config": app.market.view_config(),
+                    "counts": app.market.bot_counts(),
+                    "miner": {"blocks_found": app.bot_miners.blocks_found if app.bot_miners else 0,
+                              "running": bool(app.bot_miners and app.bot_miners.thread and app.bot_miners.thread.is_alive())},
+                })
+
+            if route == "ping":
+                return self._ok({"ts": time.time(), "name": node.name})
+
+            if route == "stream":
+                return self._sse()
 
             return self._err("Unknown endpoint", 404)
 
@@ -198,8 +295,41 @@ def make_handler(app):
                 return (self._ok({"message": message}) if ok else self._err(message))
 
             if route == "demo/tamper":
-                ok, message = node.tamper_tip(str(body.get("note", "manual tamper simulation")))
+                idx = body.get("index")
+                try:
+                    idx = int(idx) if idx is not None else None
+                except (TypeError, ValueError):
+                    idx = None
+                ok, message = node.tamper_tip(str(body.get("note", "manual tamper simulation")), index=idx)
                 return (self._ok({"message": message}) if ok else self._err(message))
+
+            if route == "demo/rollback":
+                ok, message = node.rollback_to_valid()
+                return (self._ok({"message": message}) if ok else self._err(message))
+
+            if route == "bots/config":
+                if app.market is None:
+                    return self._err("Market engine not wired", 503)
+                result = app.market.update_config(body.get("config", body))
+                cfg = app.market.view_config()
+                if app.bot_miners:
+                    if cfg.get("enabled") and int(cfg.get("miners", 0)) > 0:
+                        app.bot_miners.start()
+                    else:
+                        app.bot_miners.stop()
+                return self._ok(result)
+
+            if route == "bots/toggle":
+                if app.market is None:
+                    return self._err("Market engine not wired", 503)
+                result = app.market.update_config({"enabled": bool(body.get("enabled", True))})
+                cfg = app.market.view_config()
+                if app.bot_miners:
+                    if cfg.get("enabled") and int(cfg.get("miners", 0)) > 0:
+                        app.bot_miners.start()
+                    else:
+                        app.bot_miners.stop()
+                return self._ok(result)
 
             if route == "poll/vote":
                 ok, message = node.cast_vote(bool(body.get("vote", True)))
@@ -217,15 +347,38 @@ def make_handler(app):
 
 
 class App:
-    """Wires blockchain + miner + node together and builds every API payload."""
+    """Wires blockchain + miner + node + market engine and builds every API payload."""
 
-    def __init__(self, chain, miner, node):
+    def __init__(self, chain, miner, node, market=None, bot_miners=None):
         self.chain = chain
         self.miner = miner
         self.node = node
+        self.market = market
+        self.bot_miners = bot_miners
+        self._stats_cache_key = None
+        self._stats_cache = None        # ((balances, total_txs), expires_at)
+
+    def _cached_chain_totals(self):
+        """compute_balances() replays the whole chain — with 30 visitors polling
+        /api/state every second this MUST not run per request. Cache keyed by
+        (tip hash, epoch, mempool size) with a 2s TTL for safety."""
+        with self.chain.lock:
+            key = (self.chain.chain[-1]["hash"], self.chain.chain_epoch, len(self.chain.mempool))
+        now = time.time()
+        if self._stats_cache_key == key and self._stats_cache and self._stats_cache[1] > now:
+            return self._stats_cache[0]
+        with self.chain.lock:
+            balances = self.chain.compute_balances()
+            total_txs = sum(len(b.get("txs", [])) - 1 for b in self.chain.chain) + len(self.chain.mempool)
+        self._stats_cache_key = key
+        self._stats_cache = ((balances, total_txs), now + 2.0)
+        return self._stats_cache[0]
+
+    _print_lock = threading.Lock()
 
     def log(self, kind, text):
-        print(f"[{time.strftime('%H:%M:%S')}] [{kind}] {text}")
+        with self._print_lock:
+            print(f"[{time.strftime('%H:%M:%S')}] [{kind}] {text}", flush=True)
 
     def broadcast_state(self):
         snap = self.chain.state_snapshot("FULL_SYNC")
@@ -283,18 +436,24 @@ class App:
                 if len(latest_txs) >= 9:
                     break
             mempool_txs = [self._tx_brief(t) for t in list(c.mempool.values())[:6]]
-            balances = c.compute_balances()
-            total_txs = sum(len(b.get("txs", [])) - 1 for b in chain) + len(c.mempool)
+        balances, total_txs = self._cached_chain_totals()
         with self.node.lock:
             poll = dict(self.node.poll) if self.node.poll else None
             if poll:
                 poll["is_eligible"] = self.node.node_id in poll.get("eligible_voters", [])
             peers_n = len(self.node.peers)
         stats = self._stats(balances, total_txs, peers_n)
+        market_brief = None
+        if self.market is not None:
+            try:
+                market_brief = self.market.stats_view()
+            except Exception:
+                market_brief = None
         return {
             "self": selfv, "stats": stats,
             "latest_blocks": latest_blocks, "latest_txs": latest_txs,
             "mempool_preview": mempool_txs, "poll": poll, "node_id": self.node.node_id,
+            "market": market_brief,
         }
 
     def _stats(self, balances, total_txs, peers_n):
@@ -363,6 +522,27 @@ class App:
                 "merkle_root": block["merkle_root"], "timestamp": block["timestamp"],
                 "bits": block["bits"], "miner_address": block["miner_address"],
             })
+            # tamper forensics: re-hash the header exactly like validation does —
+            # a mismatch proves the stored data no longer hashes to its own hash.
+            # tx-level edits (inflated amounts) leave the header untouched, so we
+            # ALSO run the node's real validator (signature checks included) and
+            # report its verdict + human reason — exactly what peers reject on.
+            try:
+                recomputed = bcmod.hash_with_nonce(
+                    bcmod.header_prefix(block), int(block.get("nonce", 0) or 0))
+                out["recomputed_hash"] = recomputed
+                out["header_hash_valid"] = (recomputed == block.get("hash"))
+                out["meets_target"] = bcmod.meets_target(
+                    str(block.get("hash", "")), int(block.get("bits", 0) or 0))
+            except (KeyError, TypeError, ValueError):
+                out["header_hash_valid"] = False
+            try:
+                prev = chain[block["index"] - 1] if block["index"] > 0 else None
+                ok, reason = self.chain.validate_block(json.loads(json.dumps(block)), prev)
+            except Exception:
+                ok, reason = False, "validation error"
+            out["chain_valid"] = bool(ok)
+            out["invalid_reason"] = None if ok else str(reason)
             out["txs"] = [self._tx_brief(t, block["index"], tip - block["index"] + 1) for t in block.get("txs", [])]
             return out
 
@@ -433,7 +613,7 @@ class App:
                      "balance": balances.get(w.address, 0),
                      "pending_out": reserved.get(w.address, 0),
                      "spendable": balances.get(w.address, 0) - reserved.get(w.address, 0),
-                     "local": True}
+                     "local": True, "is_bot": bool(getattr(w, "is_bot", False))}
                     for w in self.chain.wallets.values()]
 
     def wallet_keys(self, name):

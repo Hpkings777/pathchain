@@ -361,8 +361,13 @@ class Blockchain:
         return template
 
     def apply_block(self, block):
-        """Append a block and clear its transactions from the mempool."""
+        """Append a block and clear its transactions from the mempool.
+        Returns False (and appends nothing) if the block no longer links to the
+        current tip — two miners can solve the same tip within microseconds and
+        the loser must never land in the chain."""
         with self.lock:
+            if not self.chain or block.get("prev_hash") != self.chain[-1].get("hash"):
+                return False
             self.chain.append(block)
             mined_ids = {t["txid"] for t in block.get("txs", []) if t.get("txid")}
             self.mempool = {k: v for k, v in self.mempool.items() if k not in mined_ids}

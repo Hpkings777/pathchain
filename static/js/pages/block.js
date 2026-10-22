@@ -16,9 +16,15 @@ export async function render(container, ref) {
   }
   const conf = b.confirmations;
   const isGenesis = b.index === 0;
+  const tampered = b.chain_valid === false;   // covers header edits AND tx edits
   container.innerHTML = `
+    ${tampered ? `
+    <div class="alert-banner red" style="display:flex;margin-bottom:14px">
+      <span><b>Tamper forensics:</b> this block fails the node's own validation${b.invalid_reason ? ` — <span class="mono">${esc(b.invalid_reason)}</span>` : ''}. Every honest node rejects it on sight.</span>
+      <a class="btn btn-sm" href="#/chain">See it on the chain view</a>
+    </div>` : ''}
     <div class="section-head">
-      <h2>Block <a href="#/block/${b.index}">#${b.index}</a> ${isGenesis ? badge('GENESIS', 'blue') : ''}</h2>
+      <h2>Block <a href="#/block/${b.index}">#${b.index}</a> ${isGenesis ? badge('GENESIS', 'blue') : ''} ${tampered ? badge('TAMPERED', 'red') : ''}</h2>
       <span class="right muted">${b.confirmations} confirmation(s) · mined ${timeAgo(b.timestamp)}</span>
     </div>
 

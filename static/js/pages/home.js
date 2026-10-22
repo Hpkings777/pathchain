@@ -4,6 +4,7 @@ import { esc, empty, badge, nodeChip, confirmBar, skeletonRows, tweenNumber, fla
 import { fmtAmount, fmtNum, timeAgo, fmtDur, fmtRate, shortHash, COIN, fmtUsd, fmtPct, fmtCompact } from '../fmt.js';
 import { lineChart } from '../charts.js';
 import { ensureEngine, onTick, onCoins, pathSnapshot, coins as coinState } from '../market.js';
+import { ensureMarketLive, live } from '../market2.js';
 
 let offLive = null, offTick = null, offCoins = null;
 let blockKey = '', txKey = '', chartHeight = -1;
@@ -11,6 +12,7 @@ let prevStats = null, prevPathPrice = null;
 
 export async function render(container) {
   ensureEngine();
+  ensureMarketLive();
   container.innerHTML = `
     <div class="hero">
       <h1>The trusted source for data on the <span class="grad">${COIN} blockchain</span></h1>
@@ -78,14 +80,18 @@ function skeletonStats(n = 6) {
 function paintTicker() {
   const box = document.getElementById('ticker');
   if (!box) return;
-  const s = pathSnapshot();
+  // the server's bot engine is the source of truth when it is streaming;
+  // the deterministic local walk is the clearly-labelled offline fallback
+  const m = live.snap;
+  const useServer = !!(m && typeof m.price === 'number');
+  const s = useServer ? { price: m.price, chg24h: m.chg24h } : pathSnapshot();
   const pathChip = `
     <a class="ticker-chip path" href="#/market">
       <span class="coin-badge sm path">P</span>
       <span class="sym">PATH</span>
       <span class="px">${fmtUsd(s.price)}</span>
       <span class="pct ${s.chg24h >= 0 ? 'up' : 'down'}">${fmtPct(s.chg24h)}</span>
-      <span class="st">sim</span>
+      <span class="st">${useServer ? 'bot engine' : 'sim'}</span>
     </a>`;
   const coinChips = coinState.rows.slice(0, 5).map(c => `
     <a class="ticker-chip" href="#/market" title="${esc(c.name)} — ${c.state === 'live' ? 'live from public API' : 'last fetched value'}">
